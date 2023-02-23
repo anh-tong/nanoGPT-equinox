@@ -183,6 +183,9 @@ class Block(eqx.Module):
         if config.dtype == "bfloat16":
             self.ln_1 = convert_bfloat16(ln_1)
             self.ln_2 = convert_bfloat16(ln_2)
+        else:
+            self.ln_1 = ln_1
+            self.ln_2 = ln_2
         self.attn = CausalSelfAttention(config, key=attn_key)
         self.mlp = MLP(config, key=mlp_key)
 
@@ -253,7 +256,7 @@ class GPT(eqx.Module):
         x = self.drop(tok_emb + pos_emb, key=key, inference=inference)
 
         for block in self.h:
-            key = jrandom.split(key, 1)[0]
+            key = None if key is None else jrandom.split(key, 1)[0]
             x = block(x, key=key, inference=inference)
 
         x = self.ln_f(x)
@@ -264,10 +267,49 @@ class GPT(eqx.Module):
                 logits, target.squeeze()
             )
         else:
-            logits = self.lm_head(x[-1])
+            logits = self.lm_head(x[-1])[None, :]
             loss = None
 
-        return loss
+        return logits, loss
+
+    def generate(
+        self,
+        input_tokens,
+        max_new_tokens,
+        temperature=1.0,
+        top_k=None,
+        *,
+        key: jrandom.PRNGKey,
+    ):
+
+        input_token_len = input_tokens.shape[0]
+        padding = jnp.zeros((max_new_tokens,), dtype=jnp.int32)
+        tokens = jnp.concatenate([input_tokens, padding], axis=-1)
+        indexes = jnp.arange(input_token_len, input_token_len + max_new_tokens)
+
+        def scan_f(tokens, i):
+
+            step_key = jrandom.fold_in(key, i)
+            logits, _ = self.forward(tokens, inference=True)
+            logits = logits[i - 1] / temperature
+
+            if top_k is not None:
+                top_logits, top_tokens = jax.lax.top_k(
+                    logits, min(top_k, logits.shape[-1])
+                )
+                token_idx = jrandom.categorical(step_key, top_logits, axis=-1)
+                next_token = jnp.take_along_axis(
+                    top_tokens, jnp.expand_dims(token_idx, 0), axis=-1
+                ).squeeze(-1)
+            else:
+                next_token = jrandom.categorical(step_key, logits, axis=-1)
+            tokens = tokens.at[i].set(next_token)
+
+            return tokens, None
+
+        tokens, _ = jax.lax.scan(scan_f, tokens, indexes)
+
+        return tokens
 
     def configure_optimizers(
         self,

@@ -84,14 +84,19 @@ iter_num = 0
 best_val_loss = 1e9
 
 meta_path = os.path.join(data_dir, "meta.pkl")
-meta_vocab_size = None
+vocab_size = None
 if os.path.exists(meta_path):
     with open(meta_path, "rb") as f:
         meta = pickle.load(f)
     vocab_size = meta["vocab_size"]
+    stoi, itos = meta["stoi"], meta["itos"]
+    encode = lambda s: [stoi[c] for c in s]
+    decode = lambda l: "".join([itos[i] for i in l])
     print(f"found vocab_size = {vocab_size} inside meta path {meta_path}")
 else:
     vocab_size = 50257
+    tokenizer = tiktoken.get_encoding("gpt2")
+    decode = tokenizer.decode
     print(f"vocab_size not found in {meta_path}, using GPT-2 default of 50257")
 
 model_args = dict(
@@ -107,9 +112,9 @@ model_args = dict(
 
 if init_from == "scratch":
     print("Initializing a new model from scratch")
-    if meta_vocab_size is None:
+    if vocab_size is None:
         print("defaulting to vocab_size of GPT-2 to 50304")
-    model_args["vocab_size"] = meta_vocab_size if meta_vocab_size is not None else 50304
+    model_args["vocab_size"] = vocab_size if vocab_size is not None else 50304
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf, key=model_key)
 elif init_from == "resume":
@@ -191,9 +196,6 @@ def estimate_loss(model: GPT):
     return out
 
 
-tokenizer = tiktoken.get_encoding("gpt2")
-
-
 def sample(model: GPT, token, key: jrandom.PRNGKey):
     generate_fn = partial(
         model.generate,
@@ -206,7 +208,7 @@ def sample(model: GPT, token, key: jrandom.PRNGKey):
     else:
         key = jrandom.split(key, token.shape[0])
         generated = jax.vmap(generate_fn(token, key=key))
-    return tokenizer.decode(generated)
+    return decode(np.array(generated))
 
 
 val_batch = get_batch(split="val")

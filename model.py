@@ -200,7 +200,6 @@ class Block(eqx.Module):
 class GPT(eqx.Module):
 
     config: GPTConfig = eqx.static_field()
-    lm_head: nn.Linear
     wte: nn.Embedding
     wpe: nn.Embedding
     drop: nn.Dropout
@@ -219,22 +218,14 @@ class GPT(eqx.Module):
         wpe = init_weight(
             nn.Embedding(config.block_size, config.n_embd, key=emb_key_2), key=emb_key_2
         )
-        lm_head = init_weight(
-            nn.Linear(
-                config.n_embd, config.vocab_size, use_bias=config.bias, key=lin_key
-            ),
-            key=lin_key,
-        )
         ln_f = nn.LayerNorm(config.n_embd)
         if config.dtype == "bfloat16":
             self.wte = convert_bfloat16(wte)
             self.wpe = convert_bfloat16(wpe)
-            self.lm_head = convert_bfloat16(lm_head)
             self.ln_f = convert_bfloat16(ln_f)
         else:
             self.wte = wte
             self.wpe = wpe
-            self.lm_head = lm_head
             self.ln_f = ln_f
         self.drop = nn.Dropout(config.dropout)
         self.h = [
@@ -262,12 +253,13 @@ class GPT(eqx.Module):
         x = self.ln_f(x)
 
         if target is not None:
-            logits = jax.vmap(self.lm_head)(x)
+            # https://paperswithcode.com/method/weight-tying
+            logits = jnp.dot(x, self.wte.weight.T)
             loss = optax.softmax_cross_entropy_with_integer_labels(
                 logits, target.squeeze()
             )
         else:
-            logits = self.lm_head(x[-1])[None, :]
+            logits = jnp.dot(x[-1], self.wte.weight.T)[None, :]
             loss = None
 
         return logits, loss
@@ -347,7 +339,7 @@ class GPT(eqx.Module):
             )
 
         def where_is_linear_weight(tree: GPT, return_replace=True):
-            all = [tree.lm_head.weight]
+            all = []
             for block in tree.h:
                 all.append(block.mlp.c_fc.weight)
                 all.append(block.mlp.c_proj.weight)

@@ -25,16 +25,6 @@ class GPTConfig:
     dtype: str = "bfloat16"
 
 
-def convert_bfloat16(module: eqx.Module):
-    module = eqx.tree_at(lambda l: l.weight, module, module.weight.astype(jnp.bfloat16))
-    if hasattr(module, "bias"):
-        if module.bias is not None:
-            module = eqx.tree_at(
-                lambda l: l.bias, module, module.bias.astype(jnp.bfloat16)
-            )
-    return module
-
-
 def init_weight(module: eqx.Module, *, key: jrandom.PRNGKey):
     module = eqx.tree_at(
         lambda l: l.weight,
@@ -69,23 +59,15 @@ class CausalSelfAttention(eqx.Module):
         c_proj = nn.Linear(
             config.n_embd, config.n_embd, use_bias=config.bias, key=proj_key
         )
-        c_attn = init_weight(c_attn, key=attn_key)
+        self.c_attn = init_weight(c_attn, key=attn_key)
         c_proj = init_weight(c_proj, key=proj_key)
-        c_proj = eqx.tree_at(
+        self.c_proj = eqx.tree_at(
             lambda l: l.weight,
             c_proj,
             jrandom.normal(key=proj_key, shape=c_proj.weight.shape)
             * 0.02
             / math.sqrt(2 * config.n_layer),
         )
-
-        if config.dtype == "bfloat16":
-            self.c_attn = convert_bfloat16(c_attn)
-            self.c_proj = convert_bfloat16(c_proj)
-        else:
-            self.c_attn = c_attn
-            self.c_proj = c_proj
-
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
@@ -142,20 +124,12 @@ class MLP(eqx.Module):
 
     def __init__(self, config: GPTConfig, *, key: jrandom.PRNGKey) -> None:
         fc_key, proj_key = jrandom.split(key)
-        c_fc = nn.Linear(
+        self.c_fc = nn.Linear(
             config.n_embd, config.n_embd * 4, use_bias=config.bias, key=fc_key
         )
-        c_proj = nn.Linear(
+        self.c_proj = nn.Linear(
             4 * config.n_embd, config.n_embd, use_bias=config.bias, key=proj_key
         )
-
-        if config.dtype == "bfloat16":
-            self.c_fc = convert_bfloat16(c_fc)
-            self.c_proj = convert_bfloat16(c_proj)
-        else:
-            self.c_fc = c_fc
-            self.c_proj = c_proj
-
         self.dropout = nn.Dropout(config.dropout)
 
     def __call__(self, x, *, key: jrandom.PRNGKey = None, inference: bool = None):
@@ -178,14 +152,8 @@ class Block(eqx.Module):
     def __init__(self, config: GPTConfig, *, key: jrandom.PRNGKey) -> None:
         attn_key, mlp_key = jrandom.split(key)
         self.config = config
-        ln_1 = nn.LayerNorm(config.n_embd)
-        ln_2 = nn.LayerNorm(config.n_embd)
-        if config.dtype == "bfloat16":
-            self.ln_1 = convert_bfloat16(ln_1)
-            self.ln_2 = convert_bfloat16(ln_2)
-        else:
-            self.ln_1 = ln_1
-            self.ln_2 = ln_2
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config, key=attn_key)
         self.mlp = MLP(config, key=mlp_key)
 
@@ -212,21 +180,13 @@ class GPT(eqx.Module):
         assert config.block_size is not None
 
         self.config = config
-        wte = init_weight(
+        self.wte = init_weight(
             nn.Embedding(config.vocab_size, config.n_embd, key=emb_key_1), key=emb_key_1
         )
-        wpe = init_weight(
+        self.wpe = init_weight(
             nn.Embedding(config.block_size, config.n_embd, key=emb_key_2), key=emb_key_2
         )
-        ln_f = nn.LayerNorm(config.n_embd)
-        if config.dtype == "bfloat16":
-            self.wte = convert_bfloat16(wte)
-            self.wpe = convert_bfloat16(wpe)
-            self.ln_f = convert_bfloat16(ln_f)
-        else:
-            self.wte = wte
-            self.wpe = wpe
-            self.ln_f = ln_f
+        self.ln_f = nn.LayerNorm(config.n_embd)
         self.drop = nn.Dropout(config.dropout)
         self.h = [
             Block(config, key=k) for k in jrandom.split(block_key, config.n_layer)

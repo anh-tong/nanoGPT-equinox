@@ -45,7 +45,7 @@ warmup_iters = 2000
 lr_decay_iters = 6e5
 min_lr = 6e-5
 
-dtype = "bfloat16"
+dtype = "float32"
 
 max_new_tokens = 100
 temperature = 0.8
@@ -138,6 +138,20 @@ elif init_from == "resume":
     iter_num = checkpoint_params["iter_num"]
 else:
     raise ValueError(f"init_from={init_from} not supported")
+
+
+def convert_to_bfloat16(pytree):
+    def _convert(leaf):
+        if eqx.is_array(leaf):
+            return leaf.astype(jnp.bfloat16)
+        else:
+            return leaf
+
+    return jax.tree_util.tree_map(_convert, pytree)
+
+
+if dtype == "bfloat16":
+    model = convert_to_bfloat16(model)
 
 
 optimizer = model.configure_optimizers(

@@ -204,6 +204,14 @@ def make_step(model: GPT, x, y, opt_state, key):
     return model, loss, opt_state
 
 
+@eqx.filter_jit
+def update_opt_state(model, opt_state, grads):
+    grads = jax.tree_util.tree_map(lambda leaf: jnp.mean(leaf, axis=0), grads)
+    updates, opt_state = optimizer.update(grads, opt_state, model)
+    model = eqx.apply_updates(model, updates)
+    return model
+
+
 def distributed_make_step(model: GPT, x, y, opt_state, key):
     # NOTE: do not `jit` over `pmap` see (https://github.com/google/jax/issues/2926)
     compute_loss_pmap = eqx.filter_pmap(
@@ -211,9 +219,7 @@ def distributed_make_step(model: GPT, x, y, opt_state, key):
     )
     loss, grads = compute_loss_pmap(x, y, jrandom.split(key, x.shape[0]))
     loss = jnp.mean(loss, axis=0)
-    grads = jax.tree_util.tree_map(lambda leaf: jnp.mean(leaf, axis=0), grads)
-    updates, opt_state = optimizer.update(grads, opt_state, model)
-    model = eqx.apply_updates(model, updates)
+    model = update_opt_state(model, opt_state, grads)
     return model, loss, opt_state
 
 
@@ -310,7 +316,6 @@ while True:
             key=jrandom.fold_in(train_key, iter_num),
         )
     else:
-
         batch = get_batch(split="train")
         model, loss, opt_state = make_step(
             model,

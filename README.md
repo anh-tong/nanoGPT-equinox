@@ -11,6 +11,9 @@ This project initially aims for a simple implementation. As a nature of LLMs, sc
 - [JAX documentation for multiple GPUs and hosts](https://jax.readthedocs.io/en/latest/multi_process.html)
 - [Equinox filter pmap](https://docs.kidger.site/equinox/api/filtering/transformations/#equinox.filter_pmap)
 
+
+UPDATE: multiple GPUs training is included! 
+
 ## Some small tricks and practice
 
 In Equinox, if we optimize different groups with different optimizers using `optax`. We first need to assign labels for leaves of PyTree. The `optax.multi_transform` will using information of labels to decide which optimizers to choose. Here, we have two optimizers: having weight decay and not having weight decay.

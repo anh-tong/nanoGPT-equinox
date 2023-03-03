@@ -45,11 +45,13 @@ warmup_iters = 2000
 lr_decay_iters = 6e5
 min_lr = 6e-5
 
-dtype = "float32"
+dtype = "bfloat16"
 
 max_new_tokens = 100
 temperature = 0.8
 top_k = 200
+
+distributed = True
 
 config_keys = [
     k
@@ -72,12 +74,24 @@ train_data = np.memmap(os.path.join(data_dir, "train.bin"), dtype=np.uint16, mod
 val_data = np.memmap(os.path.join(data_dir, "val.bin"), dtype=np.uint16, mode="r")
 
 
+n_devices = jax.local_device_count()
+devices = jax.local_devices()
+
+
 def get_batch(split):
     data = train_data if split == "train" else val_data
-    ix = np.random.randint(len(data) - block_size, size=(batch_size,))
-    x = np.stack([data[i : i + block_size].astype(np.int32) for i in ix])
-    y = np.stack([data[i + 1 : i + 1 + block_size].astype(np.int32)] for i in ix)
-    return jnp.array(x), jnp.array(y)
+    if distributed and split == "train":
+        ix = np.random.randint(len(data) - block_size, size=(batch_size * n_devices,))
+        x = np.stack([data[i : i + block_size].astype(np.int32) for i in ix])
+        y = np.stack([data[i + 1 : i + 1 + block_size].astype(np.int32) for i in ix])
+        x = np.reshape(x, (n_devices, batch_size, -1))
+        y = np.reshape(y, (n_devices, batch_size, -1))
+        return jnp.array(x), jnp.array(y)
+    else:
+        ix = np.random.randint(len(data) - block_size, size=(batch_size,))
+        x = np.stack([data[i : i + block_size].astype(np.int32) for i in ix])
+        y = np.stack([data[i + 1 : i + 1 + block_size].astype(np.int32)] for i in ix)
+        return jnp.array(x), jnp.array(y)
 
 
 iter_num = 0
@@ -172,7 +186,7 @@ if init_from == "resume":
 
 @eqx.filter_value_and_grad
 def compute_loss(model: GPT, inputs, labels, *, key: jrandom.PRNGKey):
-    batch_size = batch[0].shape[0]
+    batch_size = inputs.shape[0]
     key = jrandom.split(key, batch_size)
     loss = jax.vmap(lambda x, y, key: model.forward(x, y, key=key)[1])(
         inputs, labels, key=key
@@ -190,6 +204,19 @@ def make_step(model: GPT, x, y, opt_state, key):
     return model, loss, opt_state
 
 
+def distributed_make_step(model: GPT, x, y, opt_state, key):
+    # NOTE: do not `jit` over `pmap` see (https://github.com/google/jax/issues/2926)
+    compute_loss_pmap = eqx.filter_pmap(
+        lambda x_, y_, k_: eqx.filter_jit(compute_loss)(model, x_, y_, key=k_)
+    )
+    loss, grads = compute_loss_pmap(x, y, jrandom.split(key, x.shape[0]))
+    loss = jnp.mean(loss, axis=0)
+    grads = jax.tree_util.tree_map(lambda leaf: jnp.mean(leaf, axis=0), grads)
+    updates, opt_state = optimizer.update(grads, opt_state, model)
+    model = eqx.apply_updates(model, updates)
+    return model, loss, opt_state
+
+
 @eqx.filter_jit
 def compute_eval_loss(model: GPT, inputs, labels):
     loss = jax.vmap(lambda x, y: model.forward(x, y, inference=True)[1])(inputs, labels)
@@ -203,7 +230,11 @@ def estimate_loss(model: GPT):
         losses = np.zeros(eval_iters)
         for k in range(eval_iters):
             batch = get_batch(split)
-            loss = compute_eval_loss(model, batch[0], batch[1])
+            if distributed and split == "train":
+                # input of train data in distributed has extra dimemsion in the data
+                loss = compute_eval_loss(model, batch[0][0], batch[1][0])
+            else:
+                loss = compute_eval_loss(model, batch[0], batch[1])
             losses[k] = float(loss.item())
         out[split] = losses.mean()
 
@@ -269,10 +300,25 @@ while True:
     if iter_num == 0 and eval_only:
         break
 
-    batch = get_batch(split="train")
-    model, loss, opt_state = make_step(
-        model, batch[0], batch[1], opt_state, key=jrandom.fold_in(train_key, iter_num)
-    )
+    if distributed:
+        batch = get_batch(split="train")
+        model, loss, opt_state = distributed_make_step(
+            model,
+            batch[0],
+            batch[1],
+            opt_state,
+            key=jrandom.fold_in(train_key, iter_num),
+        )
+    else:
+
+        batch = get_batch(split="train")
+        model, loss, opt_state = make_step(
+            model,
+            batch[0],
+            batch[1],
+            opt_state,
+            key=jrandom.fold_in(train_key, iter_num),
+        )
 
     iter_num += 1
 

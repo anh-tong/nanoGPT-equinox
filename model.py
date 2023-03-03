@@ -217,7 +217,7 @@ class GPT(eqx.Module):
             logits = jnp.dot(x, self.wte.weight.T)
             loss = optax.softmax_cross_entropy_with_integer_labels(
                 logits, target.squeeze()
-            )
+            ).mean()
         else:
             logits = jnp.dot(x[-1], self.wte.weight.T)[None, :]
             loss = None
